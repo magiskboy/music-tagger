@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.artifact_name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact_name: MusicTagger-linux-x86_64
+            binary_name: MusicTagger
+          - os: windows-latest
+            artifact_name: MusicTagger-windows-x86_64.exe
+            binary_name: MusicTagger.exe
+          - os: macos-14
+            artifact_name: MusicTagger-macos-arm64
+            binary_name: MusicTagger
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # setup-python on Linux often lacks Tk; use a venv on the system interpreter.
+      - name: Set up Python (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip python3-venv python3-tk tcl tk
+          python3 -m venv .venv
+          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Python (Windows / macOS)
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: Build portable binary
+        run: python build.py --refresh-ffmpeg
+
+      - name: Stage release artifact
+        shell: bash
+        run: |
+          mkdir -p release
+          src="dist/${{ matrix.binary_name }}"
+          dst="release/${{ matrix.artifact_name }}"
+          if [[ ! -f "$src" ]]; then
+            echo "Missing build output: $src"
+            ls -la dist || true
+            exit 1
+          fi
+          cp "$src" "$dst"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "$dst"
+          fi
+          ls -lh "$dst"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release/${{ matrix.artifact_name }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p upload
+          find artifacts -type f -print -exec cp -v {} upload/ \;
+          ls -lh upload/
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: MusicTagger ${{ github.ref_name }}
+          generate_release_notes: true
+          files: upload/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
